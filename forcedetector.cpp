@@ -9,7 +9,7 @@
 #define HX711_DOUT D2
 #define HX711_CLK  D3
 
-HX711 scale;
+HX711 scale; 
 
 // ----- Calibration -----
 float calibrationFactor = -7050.0f;   // change after calibration
