@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Force Cane Dashboard (embedded token)</title>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 18px; background:#f7f9fc; color:#111; }
+  #top { display:flex; gap:12px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  #chartWrap { background:#fff; padding:12px; border-radius:8px; box-shadow:0 6px 18px rgba(20,30,60,0.06); max-width:1100px; margin-bottom:10px; }
+  .small { font-size:0.85rem; color:#444; }
+  .info { margin-top:6px; color:#333; }
+  button { padding:6px 10px; font-size:0.95rem; }
+  #status { font-weight:600; color:#1a73e8; margin-left:8px; }
+  #peakList { margin-top:10px; padding:8px; background:#fff; border-radius:6px; box-shadow:0 3px 8px rgba(20,30,60,0.04); min-height:38px; max-width:1100px; }
+</style>
+</head>
+<body>
+
+<h2>Force-Sensing Cane — Live (Token embedded)</h2>
+<p class="small">This page contains your Particle token embedded in the script. Replace the placeholders in the script with your <strong>device ID</strong> and <strong>access token</strong> before opening.</p>
+
+<div id="top">
+  <div>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <span id="status">Idle</span>
+  </div>
+
+  <div class="info small">
+    Poll interval:
+    <select id="pollMs">
+      <option value="200">200 ms</option>
+      <option value="500" selected>500 ms</option>
+      <option value="1000">1000 ms</option>
+    </select>
+    &nbsp;|&nbsp;
+    Peak threshold (N): <input id="peakThreshold" type="number" value="5" style="width:80px">
+    &nbsp;|&nbsp;
+    EMA alpha: <input id="emaAlpha" type="number" value="0.15" step="0.01" style="width:70px">
+  </div>
+</div>
+
+<div id="chartWrap">
+  <canvas id="forceChart" height="140"></canvas>
+</div>
+
+<div id="peakList" class="small">No peaks yet.</div>
+
+<script>
+/*
+  1) Replace the placeholders below with your actual Particle device ID and access token.
+     Note: KEEP THE TOKEN HERE ONLY FOR LOCAL/DEV USAGE — embedding tokens in client HTML is not secure.
+*/
+const PARTICLE_DEVICE_ID = "REPLACE_WITH_DEVICE_ID";
+const PARTICLE_ACCESS_TOKEN = "REPLACE_WITH_ACCESS_TOKEN";
+
+/* ----- Configuration ----- */
+const PARTICLE_VAR_NAME = "weight";     // device variable name that returns mass in kg
+const g = 9.80665;
+const MAX_POINTS = 800;
+let dataSeries = [];
+let emaValue = null;
+
+/* Chart.js setup */
+const ctx = document.getElementById('forceChart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: 'Force (N)',
+      data: [],
+      borderWidth: 2,
+      pointRadius: 0,
+      tension: 0.2,
+      borderColor: '#1f77b4',
+      fill: false
+    },{
+      label: 'Peaks',
+      data: [],
+      type: 'scatter',
+      backgroundColor: 'red',
+      pointRadius: 4,
+      showLine: false
+    }]
+  },
+  options: {
+    animation: false,
+    scales: {
+      x: { display: true, title: { display: true, text: 'Time' }, ticks: { maxRotation: 0 } },
+      y: { title: { display: true, text: 'Force (N)' }, beginAtZero: true }
+    },
+    plugins: { legend: { display: true } }
+  }
+});
+
+/* UI elements */
+const startBtn = document.getElementById('startBtn');
+const stopBtn  = document.getElementById('stopBtn');
+const statusEl = document.getElementById('status');
+const pollSelect = document.getElementById('pollMs');
+const thresholdInput = document.getElementById('peakThreshold');
+const emaInput = document.getElementById('emaAlpha');
+const peakListEl = document.getElementById('peakList');
+
+let pollTimer = null;
+let lastPeakIndex = -999;
+let peaks = [];
+
+/* Helpers */
+function nowMs(){ return Date.now(); }
+function updateStatus(s){ statusEl.textContent = s; }
+
+/* Particle REST fetch of a cloud variable */
+async function fetchWeightKg(){
+  // GET https://api.particle.io/v1/devices/{DEVICE_ID}/{VAR}?access_token={TOKEN}
+  const url = `https://api.particle.io/v1/devices/${encodeURIComponent(PARTICLE_DEVICE_ID)}/${encodeURIComponent(PARTICLE_VAR_NAME)}?access_token=${encodeURIComponent(PARTICLE_ACCESS_TOKEN)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('Particle API error ' + resp.status);
+  const json = await resp.json();
+  return parseFloat(json.result);
+}
+
+/* Peak detection (simple local maxima) */
+function detectPeaks(threshold, minDistSamples) {
+  if (dataSeries.length < 3) return [];
+  const found = [];
+  const startIdx = Math.max(1, dataSeries.length - Math.min(dataSeries.length, 400)); // check recent points
+  for (let i = startIdx; i < dataSeries.length - 1; i++){
+    const prev = dataSeries[i-1].force;
+    const val  = dataSeries[i].force;
+    const next = dataSeries[i+1].force;
+    if (val > prev && val > next && val >= threshold){
+      if ((i - lastPeakIndex) >= minDistSamples){
+        lastPeakIndex = i;
+        found.push({ idx:i, t: dataSeries[i].t, force: val, kg: dataSeries[i].kg });
+      }
+    }
+  }
+  return found;
+}
+
+/* Refresh Chart + Peak List */
+function refreshUI(){
+  // keep series trimmed
+  while (dataSeries.length > MAX_POINTS) dataSeries.shift();
+
+  chart.data.labels = dataSeries.map(p => new Date(p.t).toLocaleTimeString());
+  chart.data.datasets[0].data = dataSeries.map(p => ({ x: new Date(p.t), y: p.force }));
+  chart.data.datasets[1].data = peaks.map(p => ({ x: new Date(p.t), y: p.force }));
+  chart.update('none');
+
+  if (peaks.length === 0) peakListEl.innerText = "No peaks yet.";
+  else {
+    const recent = peaks.slice().reverse().slice(0, 12);
+    peakListEl.innerHTML = recent.map(pk => `<div><strong>${new Date(pk.t).toLocaleTimeString()}</strong> — ${pk.force.toFixed(2)} N (${(pk.kg*1000).toFixed(0)} g)</div>`).join('');
+  }
+}
+
+/* Single poll + processing */
+async function pollOnce(){
+  try {
+    const rawKg = await fetchWeightKg();              // expects mass in kg
+    if (Number.isNaN(rawKg)) throw new Error('Invalid kg');
+
+    // apply EMA on kg
+    const alpha = parseFloat(emaInput.value) || 0.15;
+    if (emaValue === null) emaValue = rawKg;
+    else emaValue = alpha * rawKg + (1 - alpha) * emaValue;
+    const kgFiltered = emaValue;
+
+    const forceN = kgFiltered * g;
+    const entry = { t: nowMs(), kg: kgFiltered, force: forceN };
+    dataSeries.push(entry);
+
+    // detect peaks
+    const thr = parseFloat(thresholdInput.value) || 0;
+    const minDist = Math.max(1, Math.round((parseInt(pollSelect.value) || 500) / 100)); // simple mapping to samples
+    const newPeaks = detectPeaks(thr, minDist);
+    if (newPeaks.length) {
+      for (const np of newPeaks) peaks.push(np);
+      if (peaks.length > 1000) peaks = peaks.slice(-1000);
+    }
+
+    refreshUI();
+  } catch (err) {
+    console.error('Poll error:', err);
+    updateStatus('Error: ' + (err.message || err));
+    // optionally stop polling on repeated errors
+  }
+}
+
+/* Start/Stop handlers */
+startBtn.addEventListener('click', () => {
+  if (pollTimer) return;
+  const ms = Math.max(50, parseInt(pollSelect.value) || 500);
+  pollOnce(); // immediate
+  pollTimer = setInterval(pollOnce, ms);
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  updateStatus('Running');
+});
+
+stopBtn.addEventListener('click', () => {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  updateStatus('Stopped');
+});
+
+/* Clean up when closing page */
+window.addEventListener('beforeunload', () => { if (pollTimer) clearInterval(pollTimer); });
+
+/* Initial UI state */
+updateStatus('Idle');
+</script>
+
+</body>
+</html>

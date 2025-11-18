@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Force Sensor Dashboard</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f5f7fa;
+            margin: 0;
+            padding: 2rem;
+            color: #333;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        /* Name input */
+        .name-section {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .name-section input {
+            padding: 0.5rem;
+            font-size: 1rem;
+            width: 250px;
+        }
+
+        .stats-container {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            margin-bottom: 3rem;
+            flex-wrap: wrap;
+        }
+
+        .stat-card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 1.5rem 2rem;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            text-align: center;
+            flex: 1 1 150px;
+            max-width: 200px;
+        }
+
+        .stat-card h3 {
+            font-size: 1rem;
+            color: #666;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-card p {
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .chart-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+        }
+
+        .history-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 1rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .history-container ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .history-container li {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Force Sensor Dashboard</h1>
+
+    <!-- Name input section -->
+    <div class="name-section">
+        <input type="text" id="personName" placeholder="Enter person's name (optional)">
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="stats-container">
+        <div class="stat-card">
+            <h3>Average Force</h3>
+            <p id="avgForce">0 N</p>
+        </div>
+        <div class="stat-card">
+            <h3>Max Force</h3>
+            <p id="maxForce">0 N</p>
+        </div>
+        <div class="stat-card">
+            <h3>Min Force</h3>
+            <p id="minForce">0 N</p>
+        </div>
+    </div>
+
+    <!-- Bar Chart -->
+    <div class="chart-container">
+        <canvas id="forceChart"></canvas>
+    </div>
+
+    <!-- History Log -->
+    <div class="history-container">
+        <h3>Force Data History</h3>
+        <ul id="forceHistory"></ul>
+    </div>
+
+    <script>
+        // Array to store all force entries
+        let forceData = [];
+
+        // DOM elements
+        const avgForceElem = document.getElementById('avgForce');
+        const maxForceElem = document.getElementById('maxForce');
+        const minForceElem = document.getElementById('minForce');
+        const historyElem = document.getElementById('forceHistory');
+        const personNameInput = document.getElementById('personName');
+
+        // Chart.js setup
+        const ctx = document.getElementById('forceChart').getContext('2d');
+        const forceChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['Average', 'Max', 'Min'],
+                datasets: [{
+                    label: 'Force (N)',
+                    data: [0, 0, 0],
+                    backgroundColor: ['#4CAF50','#F44336','#2196F3'],
+                    borderRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: { y: { beginAtZero: true, title: { display: true, text: 'Force (N)' } } }
+            }
+        });
+
+        // Update dashboard stats
+        function updateDashboard() {
+            if(forceData.length === 0) return;
+            const values = forceData.map(entry => entry.value);
+            const avg = (values.reduce((a,b)=>a+b,0)/values.length).toFixed(2);
+            const max = Math.max(...values).toFixed(2);
+            const min = Math.min(...values).toFixed(2);
+
+            avgForceElem.textContent = avg + ' N';
+            maxForceElem.textContent = max + ' N';
+            minForceElem.textContent = min + ' N';
+
+            forceChart.data.datasets[0].data = [avg, max, min];
+            forceChart.update();
+        }
+
+        // Update history log
+        function updateHistory() {
+            historyElem.innerHTML = '';
+            forceData.forEach((entry, index) => {
+                const li = document.createElement('li');
+                li.textContent = `#${index+1} (${entry.name}): ${entry.value} N`;
+                historyElem.appendChild(li);
+            });
+            historyElem.scrollTop = historyElem.scrollHeight;
+        }
+
+        // Function to add a new force entry (called from C++/server)
+        function addForce(value) {
+            const name = personNameInput.value.trim() || "Anonymous";
+            forceData.push({ value: value, name: name });
+            updateDashboard();
+            updateHistory();
+            // Clear the name input so user can enter next name
+            personNameInput.value = "";
+        }
+
+        // Example: simulate receiving data from C++
+        // Remove this in production; C++ can call addForce(value)
+        setInterval(() => {
+            const simulatedValue = (Math.random()*50 + 10).toFixed(2); // Random 10-60 N
+            addForce(parseFloat(simulatedValue));
+        }, 3000);
+    </script>
+
+</body>
+</html>

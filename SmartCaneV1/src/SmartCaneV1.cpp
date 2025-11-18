@@ -1,35 +1,164 @@
-/* 
- * Project myProject
- * Author: Your Name
- * Date: 
- * For comprehensive documentation and examples, please visit:
- * https://docs.particle.io/firmware/best-practices/firmware-template/
- */
-
-// Include Particle Device OS APIs
 #include "Particle.h"
+#include "HX711ADC.h"
+#include <vector>
 
-// Let Device OS manage the connection to the Particle Cloud
 SYSTEM_MODE(AUTOMATIC);
-
-// Run the application and system concurrently in separate threads
 SYSTEM_THREAD(ENABLED);
 
-// Show system, cloud connectivity, and application logs over USB
-// View logs with CLI using 'particle serial monitor --follow'
-SerialLogHandler logHandler(LOG_LEVEL_INFO);
+// --------------------------------------------------------
+// Pins
+// --------------------------------------------------------
+#define HX711_DOUT D2
+#define HX711_SCK  D3
+#define BUTTON_PIN D5
+#define LED_PIN    D6     // LED indicator
 
-// setup() runs once, when the device is first turned on
+// --------------------------------------------------------
+HX711ADC scale(HX711_DOUT, HX711_SCK);
+
+// --------------------------------------------------------
+// Calibration + thresholds
+// --------------------------------------------------------
+float calibrationFactor = -7050;
+float zeroOffset = 0;
+
+float stepThreshold = 10.0;     // Newtons needed to count a step
+bool aboveThreshold = false;     // Track force state for step detection
+
+// --------------------------------------------------------
+// Data logging buffers
+// --------------------------------------------------------
+std::vector<float> forceData;
+std::vector<unsigned long> timeData;
+
+int stepCount = 0;
+
+// --------------------------------------------------------
+// Logging control
+// --------------------------------------------------------
+bool loggingActive = false;
+bool prevButton = false;
+
+unsigned long lastSample = 0;
+unsigned long sampleInterval = 100;  // ms
+
+// --------------------------------------------------------
 void setup() {
-  // Put initialization like pinMode and begin functions here
+    pinMode(BUTTON_PIN, INPUT_PULLDOWN);
+    pinMode(LED_PIN, OUTPUT);
+
+    digitalWrite(LED_PIN, LOW);
+
+    scale.begin();
+    delay(500);
+    scale.start(2000);
+    scale.setCalFactor(calibrationFactor);
+    zeroOffset = scale.read();
+
+    Particle.publish("status", "Boot Complete", PRIVATE);
 }
 
-// loop() runs over and over again, as quickly as it can execute.
-void loop() {
-  // The core of your code will likely live here.
+// --------------------------------------------------------
+float readForce() {
+    float raw = scale.read();
+    float f = (raw - zeroOffset) * (1.0 / calibrationFactor) * 100.0;
+    if (f < 0) f = 0;
+    return f;
+}
 
-  // Example: Publish event to cloud every 10 seconds. Uncomment the next 3 lines to try it!
-  // Log.info("Sending Hello World to the cloud!");
-  // Particle.publish("Hello world!");
-  // delay( 10 * 1000 ); // milliseconds and blocking - see docs for more info!
+// --------------------------------------------------------
+// Step detection: rising-edge threshold crossing
+// --------------------------------------------------------
+void detectStep(float force) {
+    if (force > stepThreshold && !aboveThreshold) {
+        stepCount++;
+        aboveThreshold = true;
+    }
+    if (force < stepThreshold) {
+        aboveThreshold = false;
+    }
+}
+
+// --------------------------------------------------------
+// Build JSON upload
+// --------------------------------------------------------
+String buildJSON() {
+    String json = "{ \"steps\": ";
+    json += String(stepCount);
+    json += ", \"force\": [";
+
+    for (size_t i = 0; i < forceData.size(); i++) {
+        json += String::format("{\"t\":%lu,\"f\":%.2f}", timeData[i], forceData[i]);
+        if (i < forceData.size() - 1) json += ",";
+    }
+    json += "] }";
+
+    return json;
+}
+
+// --------------------------------------------------------
+void uploadSession() {
+
+    // Blink LED during upload
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(150);
+        digitalWrite(LED_PIN, LOW);
+        delay(150);
+    }
+
+    String payload = buildJSON();
+    Particle.publish("session_data", payload, PRIVATE);
+
+    forceData.clear();
+    timeData.clear();
+    stepCount = 0;
+    aboveThreshold = false;
+
+    Particle.publish("status", "Upload Complete", PRIVATE);
+}
+
+// --------------------------------------------------------
+// MAIN LOOP
+// --------------------------------------------------------
+void loop() {
+
+    // Button press (rising edge)
+    bool pressed = digitalRead(BUTTON_PIN);
+
+    if (pressed && !prevButton) {
+        loggingActive = !loggingActive;
+
+        if (loggingActive) {
+            // Start logging
+            forceData.clear();
+            timeData.clear();
+            stepCount = 0;
+            aboveThreshold = false;
+
+            digitalWrite(LED_PIN, HIGH);  // LED ON = logging
+            Particle.publish("status", "Logging Started", PRIVATE);
+        }
+        else {
+            // Stop logging + upload
+            digitalWrite(LED_PIN, LOW);   // LED OFF = idle
+            Particle.publish("status", "Logging Stopped", PRIVATE);
+
+            uploadSession();
+        }
+    }
+
+    prevButton = pressed;
+
+    // Logging loop
+    if (loggingActive && millis() - lastSample >= sampleInterval) {
+        lastSample = millis();
+
+        float f = readForce();
+
+        forceData.push_back(f);
+        timeData.push_back(millis());
+
+        detectStep(f);  // <-- Step detection here
+    }
 }
