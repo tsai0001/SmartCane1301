@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Force Cane – Chunked Session Viewer</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+  body { font-family: system-ui, sans-serif; margin: 20px; background: #f4f7fb; }
+  .box { background:#fff; padding:16px; border-radius:10px;
+         box-shadow:0 5px 18px rgba(0,0,0,0.08); margin-bottom:20px; max-width:1100px;}
+  .title { font-size:1.2rem; font-weight:600; margin-bottom:8px;}
+  .value { font-size:1rem; margin-bottom:4px;}
+</style>
+</head>
+
+<body>
+
+<h2>Force Cane — Session Viewer (10-second uploads)</h2>
+
+<div class="box">
+  <div class="title">Session Info</div>
+  <div id="sessionInfo">Waiting for session…</div>
+</div>
+
+<div class="box">
+  <div class="title">Force vs Time (most recent session)</div>
+  <canvas id="forceChart" height="150"></canvas>
+</div>
+
+<script>
+/* -------------------------------------------------------------------
+   USER SETTINGS
+------------------------------------------------------------------- */
+const DEVICE_ID = "0a10aced202194944a069970";
+const TOKEN     = "2201e873035402da145a14316d15d5e78c31c998";
+
+/* -------------------------------------------------------------------
+   CHART SETUP
+------------------------------------------------------------------- */
+
+const ctx = document.getElementById("forceChart").getContext("2d");
+
+const forceChart = new Chart(ctx, {
+    type: "line",
+    data: {
+        labels: [],
+        datasets: [{
+            label: "Force (N)",
+            data: [],
+            borderWidth: 2,
+            tension: 0.15,
+            fill: false,
+            pointRadius: 0,
+            borderColor: "#d62828"
+        }]
+    },
+    options: {
+        animation: false,
+        scales: {
+            x: { title: { display: true, text: "Time (ms)" }},
+            y: { title: { display: true, text: "Force (N)" }, beginAtZero: true }
+        }
+    }
+});
+
+const infoBox = document.getElementById("sessionInfo");
+
+/* -------------------------------------------------------------------
+   EVENT STREAM (ONLY force_* events)
+   This is the FIX that makes it work!
+------------------------------------------------------------------- */
+
+const url =
+  `https://api.particle.io/v1/devices/${DEVICE_ID}/events/force?access_token=${TOKEN}`;
+console.log("Connecting to:", url);
+
+const stream = new EventSource(url);
+
+/* -------------------------------------------------------------------
+   CHUNK HANDLING
+------------------------------------------------------------------- */
+
+let expectedChunks = 0;
+let receivedChunks = 0;
+let buffer = [];
+
+/* When session begins */
+stream.addEventListener("force_begin", (evt) => {
+    expectedChunks = parseInt(evt.data);
+    receivedChunks = 0;
+    buffer = [];
+
+    infoBox.innerHTML = `
+        <div class="value"><strong>Incoming session…</strong></div>
+        <div class="value">Expecting ${expectedChunks} chunks</div>
+    `;
+
+    // reset chart
+    forceChart.data.labels = [];
+    forceChart.data.datasets[0].data = [];
+    forceChart.update('none');
+});
+
+/* When a chunk arrives */
+stream.addEventListener("message", (evt) => {
+    let obj;
+    try { obj = JSON.parse(evt.data); } catch { return; }
+
+    if (!obj.event.startsWith("force_chunk_")) return;
+
+    buffer.push(obj.data);
+    receivedChunks++;
+
+    infoBox.innerHTML = `
+        <div class="value">Receiving chunks…</div>
+        <div class="value">${receivedChunks} / ${expectedChunks}</div>
+    `;
+});
+
+/* When session is complete */
+stream.addEventListener("force_done", () => {
+    if (receivedChunks !== expectedChunks) {
+        infoBox.innerHTML += `
+            <div class="value" style="color:red">
+                Error: received ${receivedChunks}/${expectedChunks}
+            </div>`;
+        return;
+    }
+
+    const fullJSON = buffer.join("");
+
+    let session;
+    try {
+        session = JSON.parse(fullJSON);
+    } catch (err) {
+        infoBox.innerHTML = `<span style="color:red">JSON parse error!</span>`;
+        console.error(err);
+        return;
+    }
+
+    renderSession(session);
+});
+
+/* -------------------------------------------------------------------
+   RENDER SESSION
+------------------------------------------------------------------- */
+
+function renderSession(session) {
+    const samples = session.samples;
+    const steps = session.steps;
+
+    const maxF = Math.max(...samples.map(s => s.f));
+    const avgF = samples.reduce((a,b)=>a+b.f,0)/samples.length;
+
+    infoBox.innerHTML = `
+        <div class="value"><strong>Session complete!</strong></div>
+        <div class="value">Steps: ${steps}</div>
+        <div class="value">Max Force: ${maxF.toFixed(2)} N</div>
+        <div class="value">Avg Force: ${avgF.toFixed(2)} N</div>
+        <div class="value">Samples: ${samples.length}</div>
+    `;
+
+    // plot
+    forceChart.data.labels = samples.map(s => s.t);
+    forceChart.data.datasets[0].data = samples.map(s => s.f);
+    forceChart.update('none');
+}
+</script>
+
+</body>
+</html>

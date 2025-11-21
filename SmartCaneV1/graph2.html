@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Force Cane – Session Viewer (Fixed Parsing)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+  body { font-family: system-ui, sans-serif; margin: 20px; background: #f4f7fb; }
+  .box { background:#fff; padding:16px; border-radius:10px;
+         box-shadow:0 5px 18px rgba(0,0,0,0.08); margin-bottom:20px; max-width:1100px;}
+  .title { font-size:1.2rem; font-weight:600; margin-bottom:8px;}
+</style>
+</head>
+
+<body>
+
+<h2>Force Cane — LIVE TEST!!</h2>
+1
+<div class="box">
+  <div class="title">Incoming Events</div>
+  <pre id="log">Connecting…</pre>
+</div>
+
+<div class="box">
+  <div class="title">Force Data</div>
+  <canvas id="forceChart" height="150"></canvas>
+</div>
+
+<script>
+const log = document.getElementById("log");
+const stream = new EventSource("http://localhost:3000/events");
+
+let expectedChunks = 0;
+let receivedChunks = 0;
+let allData = "";   // accumulate raw json parts
+
+log.textContent = "Connecting to /events …";
+
+// ------------------------------------------------------
+// Chart
+// ------------------------------------------------------
+const ctx = document.getElementById("forceChart").getContext("2d");
+const chart = new Chart(ctx, {
+  type: "line",
+  data: {
+    labels: [],
+    datasets: [{
+      label: "Force (N)",
+      data: [],
+      borderWidth: 2,
+      borderColor: "#d62828",
+      tension: 0.1,
+      pointRadius: 2
+    }]
+  },
+  options: {
+    animation: false,
+    scales: {
+      x: { title: { display: true, text: "Time (ms)" }},
+      y: { title: { display: true, text: "Force (N)" }, beginAtZero: true }
+    }
+  }
+});
+
+// ------------------------------------------------------
+// SSE Events
+// ------------------------------------------------------
+stream.addEventListener("force_begin", evt => {
+  log.textContent += `\n--- force_begin ---\n${evt.data}\n`;
+
+  expectedChunks = parseInt(evt.data);
+  receivedChunks = 0;
+  allData = "";
+
+  chart.data.labels = [];
+  chart.data.datasets[0].data = [];
+  chart.update();
+});
+
+// Listen for force_chunk_X for 0..500 chunks safely
+for (let i = 0; i < 500; i++) {
+  stream.addEventListener(`force_chunk_${i}`, evt => {
+    receivedChunks++;
+    log.textContent += `chunk ${i}: (${evt.data.length} bytes)\n`;
+
+    // chunks are plain text (part of one big JSON)
+    allData += evt.data;
+  });
+}
+
+stream.addEventListener("force_done", evt => {
+  log.textContent += `\n--- force_done ---\n${evt.data}\n`;
+
+  try {
+    const parsed = JSON.parse(allData);
+
+    const samples = parsed.samples;
+
+    samples.forEach(s => {
+      chart.data.labels.push(s.t);
+      chart.data.datasets[0].data.push(s.f);
+    });
+
+    chart.update();
+
+    log.textContent += `\nParsed ${samples.length} samples.\n`;
+
+  } catch (err) {
+    log.textContent += "\n❌ JSON parse failed.\n";
+    console.error(err);
+  }
+});
+</script>
+
+</body>
+</html>
